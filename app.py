@@ -6,20 +6,29 @@ import secrets
 from datetime import datetime, timezone
 
 BASE = os.path.dirname(os.path.abspath(__file__))
+IS_VERCEL = os.environ.get('VERCEL') == '1'
 
 app = Flask(__name__, static_folder='static', static_url_path='/static')
 
+# Set SECRET_KEY in Vercel for stable login sessions between function instances.
 app.secret_key = os.environ.get('SECRET_KEY', secrets.token_hex(32))
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
-app.config['SESSION_COOKIE_SECURE'] = os.environ.get('COOKIE_SECURE', '0') == '1'
-
-# Local = SQLite
-# Online = PostgreSQL through DATABASE_URL
-database_url = os.environ.get(
-    'DATABASE_URL',
-    f"sqlite:///{os.path.join(BASE, 'grades.db')}"
+app.config['SESSION_COOKIE_SECURE'] = (
+    os.environ.get('COOKIE_SECURE', '1' if IS_VERCEL else '0') == '1'
 )
+
+# Local development uses the SQLite file in the repository.
+# Vercel's deployed filesystem is read-only, so without DATABASE_URL we use
+# /tmp only as a temporary fallback. For real persistence, set DATABASE_URL
+# to a hosted PostgreSQL database in Vercel.
+database_url = os.environ.get('DATABASE_URL')
+
+if not database_url:
+    if IS_VERCEL:
+        database_url = 'sqlite:///' + os.path.join('/tmp', 'grades.db')
+    else:
+        database_url = 'sqlite:///' + os.path.join(BASE, 'grades.db')
 
 # Some PostgreSQL providers still return postgres://
 if database_url.startswith('postgres://'):
@@ -27,6 +36,11 @@ if database_url.startswith('postgres://'):
 
 app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+# Avoid SQLAlchemy trying to create an instance directory on Vercel.
+app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+    'pool_pre_ping': True,
+}
 
 db = SQLAlchemy(app)
 
@@ -105,7 +119,7 @@ def hash_code(code):
 def init_db():
     db.create_all()
 
-    # Create demo account only when the database is completely empty
+    # Create demo account only when the database is completely empty.
     if Student.query.first() is None:
         now = datetime.now(timezone.utc)
 
@@ -175,7 +189,6 @@ def note_payload(note):
 
 
 def student_payload(student):
-
     grades = (
         Grade.query
         .filter_by(student_id=student.id)
@@ -199,6 +212,19 @@ def student_payload(student):
     }
 
 
+@app.errorhandler(Exception)
+def handle_unexpected_error(error):
+    # Always return JSON for API failures so the frontend can show the real error
+    # instead of only displaying a generic HTTP 500 page.
+    db.session.rollback()
+    app.logger.exception('Unhandled application error')
+
+    if request.path.startswith('/api/'):
+        return jsonify({'error': 'Server error. Check the Vercel function logs.'}), 500
+
+    return 'Server error. Check the Vercel function logs.', 500
+
+
 @app.get('/')
 def index():
     return send_from_directory(BASE, 'index.html')
@@ -206,7 +232,6 @@ def index():
 
 @app.get('/api/me')
 def me():
-
     student = get_student_by_session()
 
     return jsonify({
@@ -217,43 +242,31 @@ def me():
 
 @app.post('/api/auth')
 def auth():
-
     data = request.get_json(force=True)
-
     code = (data.get('code') or '').strip()
 
     if not code:
-        return jsonify({
-            'error': 'Student code is required.'
-        }), 400
+        return jsonify({'error': 'Student code is required.'}), 400
 
     student = Student.query.filter_by(
         code_hash=hash_code(code)
     ).first()
 
     if not student:
-        return jsonify({
-            'error': 'Invalid student code.'
-        }), 401
+        return jsonify({'error': 'Invalid student code.'}), 401
 
     session['student_id'] = student.id
-
     return jsonify(student_payload(student))
 
 
 @app.post('/api/logout')
 def logout():
-
     session.clear()
-
-    return jsonify({
-        'ok': True
-    })
+    return jsonify({'ok': True})
 
 
 @app.post('/api/students')
 def create_student():
-
     data = request.get_json(force=True)
 
     name = (data.get('name') or '').strip()
@@ -269,9 +282,7 @@ def create_student():
     ).first()
 
     if existing:
-        return jsonify({
-            'error': 'That student code is already in use.'
-        }), 409
+        return jsonify({'error': 'That student code is already in use.'}), 409
 
     student = Student(
         name=name,
@@ -284,41 +295,29 @@ def create_student():
     db.session.commit()
 
     session['student_id'] = student.id
-
     return jsonify(student_payload(student)), 201
 
 
 @app.post('/api/grades')
 def add_grade():
-
     student = get_student_by_session()
 
     if not student:
-        return jsonify({
-            'error': 'Authenticate first.'
-        }), 401
+        return jsonify({'error': 'Authenticate first.'}), 401
 
     data = request.get_json(force=True)
-
     subject = (data.get('subject') or '').strip()
 
     try:
         grade = float(data.get('grade'))
         maximum = float(data.get('max_grade'))
     except (TypeError, ValueError):
-        return jsonify({
-            'error': 'Grade and maximum must be numbers.'
-        }), 400
+        return jsonify({'error': 'Grade and maximum must be numbers.'}), 400
 
     if not subject or maximum <= 0 or grade < 0 or grade > maximum:
-        return jsonify({
-            'error': 'Check the subject and grade range.'
-        }), 400
+        return jsonify({'error': 'Check the subject and grade range.'}), 400
 
-    percentage = round(
-        (grade / maximum) * 100,
-        2
-    )
+    percentage = round((grade / maximum) * 100, 2)
 
     new_grade = Grade(
         student_id=student.id,
@@ -332,21 +331,15 @@ def add_grade():
     db.session.add(new_grade)
     db.session.commit()
 
-    return jsonify({
-        'ok': True,
-        'percentage': percentage
-    })
+    return jsonify({'ok': True, 'percentage': percentage})
 
 
 @app.post('/api/notes')
 def add_note():
-
     student = get_student_by_session()
 
     if not student:
-        return jsonify({
-            'error': 'Authenticate first.'
-        }), 401
+        return jsonify({'error': 'Authenticate first.'}), 401
 
     data = request.get_json(force=True)
 
@@ -355,9 +348,7 @@ def add_note():
     period = (data.get('period') or '').strip() or None
 
     if not note:
-        return jsonify({
-            'error': 'Write a note first.'
-        }), 400
+        return jsonify({'error': 'Write a note first.'}), 400
 
     new_note = Note(
         student_id=student.id,
@@ -370,25 +361,20 @@ def add_note():
     db.session.add(new_note)
     db.session.commit()
 
-    return jsonify({
-        'ok': True
-    })
+    return jsonify({'ok': True})
 
 
 @app.get('/api/data')
 def data():
-
     student = get_student_by_session()
 
     if not student:
-        return jsonify({
-            'error': 'Authenticate first.'
-        }), 401
+        return jsonify({'error': 'Authenticate first.'}), 401
 
     return jsonify(student_payload(student))
 
 
-# Create database tables automatically
+# Create database tables automatically.
 with app.app_context():
     init_db()
 
