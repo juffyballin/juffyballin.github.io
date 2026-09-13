@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GradeTrack — Student Progress</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<div id="toast" class="toast"></div>
+<header class="topbar">
+  <div class="brand"><span class="brand-mark">G</span><span>GradeTrack</span></div>
+  <div id="userArea" class="user-area hidden"><span id="userName"></span><button class="ghost" onclick="logout()">Log out</button></div>
+</header>
+
+<main>
+  <section id="landing" class="landing">
+    <div class="hero">
+      <div class="eyebrow">Student progress, without the spreadsheet hell.</div>
+      <h1>Track grades.<br><span>See the trend.</span></h1>
+      <p>Enter results as you get them, watch every subject move over time, and give parents a clean snapshot of progress.</p>
+      <div class="role-switch">
+        <button class="role active" data-role="student" onclick="selectRole('student')">Student</button>
+        <button class="role" data-role="parent" onclick="selectRole('parent')">Parent</button>
+      </div>
+      <div id="studentAuth" class="auth-card">
+        <h2>Open a student profile</h2>
+        <p>Use an existing student code, or create a new local profile.</p>
+        <div class="field"><label>Student code</label><input id="studentCode" placeholder="e.g. WAEL-2026" /></div>
+        <button class="primary" onclick="authenticate()">Open profile →</button>
+        <div class="divider"><span>or</span></div>
+        <div class="create-row"><input id="newName" placeholder="Student name"/><input id="newCode" placeholder="New code"/><button class="secondary" onclick="createStudent()">Create</button></div>
+        <div class="demo">Demo code: <button onclick="useDemo()">DEMO-2026</button></div>
+      </div>
+      <div id="parentAuth" class="auth-card hidden">
+        <h2>Parent access</h2>
+        <p>Enter the student's code to securely open their progress profile.</p>
+        <div class="field"><label>Student code</label><input id="parentCode" placeholder="e.g. WAEL-2026" onkeydown="if(event.key==='Enter') authenticate()" /></div>
+        <button class="primary" onclick="authenticate()">View student →</button>
+        <div class="demo">Demo code: <button onclick="document.getElementById('parentCode').value='DEMO-2026'">DEMO-2026</button></div>
+      </div>
+    </div>
+    <div class="feature-strip"><div><b>Automatic %</b><span>Points become percentages instantly.</span></div><div><b>History</b><span>Every result is saved with a timestamp.</span></div><div><b>Parent notes</b><span>Attach context to subjects or periods.</span></div></div>
+  </section>
+
+  <section id="app" class="dashboard hidden">
+    <aside class="sidebar">
+      <div class="profile"><div class="avatar" id="avatar">D</div><div><strong id="sideName">Student</strong><small id="sideCode"></small></div></div>
+      <button class="nav active" data-view="overview" onclick="showView('overview')">Overview</button>
+      <button class="nav" data-view="history" onclick="showView('history')">History</button>
+      <button class="nav" data-view="notes" onclick="showView('notes')">Notes</button>
+      <div class="side-bottom"><button class="ghost" onclick="logout()">← Exit profile</button></div>
+    </aside>
+
+    <div class="content">
+      <div id="overviewView" class="view">
+        <div class="page-head"><div><div class="eyebrow">Overview</div><h2>Grade dashboard</h2><p id="welcomeText">Your latest results at a glance.</p></div><div class="stat-card"><span>Overall average</span><strong id="average">—</strong></div></div>
+        <div class="grid-two">
+          <div class="panel chart-panel"><div class="panel-head"><div><h3>Current performance</h3><p>Latest percentage for every subject</p></div></div><canvas id="currentChart"></canvas></div>
+          <div class="panel chart-panel"><div class="panel-head"><div><h3>Progress over time</h3><p>Compare each recorded result</p></div></div><canvas id="historyChart"></canvas></div>
+        </div>
+        <div class="panel"><div class="panel-head"><div><h3>Latest grades</h3><p>New results are automatically added to the timeline.</p></div><button id="addGradeButton" class="secondary" onclick="openGradeModal()">+ Add grade</button></div><div id="latestGrades" class="grade-list"></div></div>
+      </div>
+
+      <div id="historyView" class="view hidden">
+        <div class="page-head"><div><div class="eyebrow">History</div><h2>Grade progression</h2><p>See how each subject has changed from one result to the next.</p></div></div>
+        <div class="panel"><div id="historyTable" class="table-wrap"></div></div>
+      </div>
+
+      <div id="notesView" class="view hidden">
+        <div class="page-head"><div><div class="eyebrow">Notes</div><h2>Progress notes</h2><p>Parents can add context to a subject or a specific time period.</p></div></div>
+        <div class="grid-two notes-grid">
+          <div class="panel" id="notesComposer"><div class="panel-head"><div><h3>Add a note</h3><p>Keep feedback tied to something useful.</p></div></div><div class="field"><label>Subject (optional)</label><input id="noteSubject" placeholder="e.g. Physics" /></div><div class="field"><label>Time period (optional)</label><input id="notePeriod" placeholder="e.g. September 2026" /></div><div class="field"><label>Comment</label><textarea id="noteText" rows="5" placeholder="What are you noticing?"></textarea></div><button class="primary" onclick="addNote()">Save note</button></div>
+          <div class="panel"><div class="panel-head"><div><h3>Saved notes</h3></div></div><div id="notesList"></div></div>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div id="gradeModal" class="modal hidden"><div class="modal-card"><button class="modal-close" onclick="closeGradeModal()">×</button><div class="eyebrow">New result</div><h2>Add a grade</h2><p>The percentage is calculated automatically.</p><div class="field"><label>Subject</label><input id="gradeSubject" placeholder="e.g. Mathematics"/></div><div class="two-fields"><div class="field"><label>Points earned</label><input id="gradeValue" type="number" min="0" step="0.01" oninput="previewPercentage()"/></div><div class="field"><label>Points possible</label><input id="maxValue" type="number" min="0.01" step="0.01" value="100" oninput="previewPercentage()"/></div></div><div class="percentage-preview">Calculated percentage <strong id="pctPreview">0%</strong></div><button class="primary" onclick="saveGrade()">Save result</button></div></div>
+
+<script src="/static/app.js"></script>
+</body></html>
