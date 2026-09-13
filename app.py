@@ -1,174 +1,401 @@
 from flask import Flask, request, jsonify, session, send_from_directory
-import sqlite3, hashlib, os, secrets
+from flask_sqlalchemy import SQLAlchemy
+import hashlib
+import os
+import secrets
 from datetime import datetime, timezone
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-DB = os.path.join(BASE, 'grades.db')
+
 app = Flask(__name__, static_folder='static', static_url_path='/static')
+
 app.secret_key = os.environ.get('SECRET_KEY', secrets.token_hex(32))
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['SESSION_COOKIE_SECURE'] = os.environ.get('COOKIE_SECURE', '0') == '1'
+
+# Local = SQLite
+# Online = PostgreSQL through DATABASE_URL
+database_url = os.environ.get(
+    'DATABASE_URL',
+    f"sqlite:///{os.path.join(BASE, 'grades.db')}"
+)
+
+# Some PostgreSQL providers still return postgres://
+if database_url.startswith('postgres://'):
+    database_url = database_url.replace('postgres://', 'postgresql://', 1)
+
+app.config['SQLALCHEMY_DATABASE_URI'] = database_url
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+db = SQLAlchemy(app)
 
 
-def db():
-    conn = sqlite3.connect(DB)
-    conn.row_factory = sqlite3.Row
-    conn.execute('PRAGMA foreign_keys = ON')
-    return conn
+class Student(db.Model):
+    __tablename__ = 'students'
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(120), nullable=False)
+    code_hash = db.Column(db.String(64), nullable=False, unique=True, index=True)
+    code_display = db.Column(db.String(120), nullable=False)
+    created_at = db.Column(db.DateTime(timezone=True), nullable=False)
+
+    grades = db.relationship(
+        'Grade',
+        backref='student',
+        cascade='all, delete-orphan'
+    )
+
+    notes = db.relationship(
+        'Note',
+        backref='student',
+        cascade='all, delete-orphan'
+    )
 
 
-def hash_code(code: str) -> str:
-    return hashlib.sha256(code.strip().upper().encode()).hexdigest()
+class Grade(db.Model):
+    __tablename__ = 'grades'
+
+    id = db.Column(db.Integer, primary_key=True)
+    student_id = db.Column(
+        db.Integer,
+        db.ForeignKey('students.id', ondelete='CASCADE'),
+        nullable=False,
+        index=True
+    )
+
+    subject = db.Column(db.String(120), nullable=False)
+    grade = db.Column(db.Float, nullable=False)
+    max_grade = db.Column(db.Float, nullable=False)
+    percentage = db.Column(db.Float, nullable=False)
+    recorded_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        index=True
+    )
+
+
+class Note(db.Model):
+    __tablename__ = 'notes'
+
+    id = db.Column(db.Integer, primary_key=True)
+    student_id = db.Column(
+        db.Integer,
+        db.ForeignKey('students.id', ondelete='CASCADE'),
+        nullable=False,
+        index=True
+    )
+
+    subject = db.Column(db.String(120))
+    note = db.Column(db.Text, nullable=False)
+    period = db.Column(db.String(120))
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        index=True
+    )
+
+
+def hash_code(code):
+    return hashlib.sha256(
+        code.strip().upper().encode()
+    ).hexdigest()
 
 
 def init_db():
-    conn = db()
-    conn.executescript('''
-    CREATE TABLE IF NOT EXISTS students (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        code_hash TEXT NOT NULL UNIQUE,
-        code_display TEXT NOT NULL,
-        created_at TEXT NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS grades (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        student_id INTEGER NOT NULL,
-        subject TEXT NOT NULL,
-        grade REAL NOT NULL,
-        max_grade REAL NOT NULL,
-        percentage REAL NOT NULL,
-        recorded_at TEXT NOT NULL,
-        FOREIGN KEY(student_id) REFERENCES students(id) ON DELETE CASCADE
-    );
-    CREATE TABLE IF NOT EXISTS notes (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        student_id INTEGER NOT NULL,
-        subject TEXT,
-        note TEXT NOT NULL,
-        period TEXT,
-        created_at TEXT NOT NULL,
-        FOREIGN KEY(student_id) REFERENCES students(id) ON DELETE CASCADE
-    );
-    ''')
-    # A safe local demo account makes the prototype immediately testable.
-    if conn.execute('SELECT 1 FROM students LIMIT 1').fetchone() is None:
-        now = datetime.now(timezone.utc).isoformat()
-        conn.execute('INSERT INTO students(name, code_hash, code_display, created_at) VALUES(?,?,?,?)',
-                     ('Demo Student', hash_code('DEMO-2026'), 'DEMO-2026', now))
-        sid = conn.execute('SELECT last_insert_rowid()').fetchone()[0]
+    db.create_all()
+
+    # Create demo account only when the database is completely empty
+    if Student.query.first() is None:
+        now = datetime.now(timezone.utc)
+
+        student = Student(
+            name='Demo Student',
+            code_hash=hash_code('DEMO-2026'),
+            code_display='DEMO-2026',
+            created_at=now
+        )
+
+        db.session.add(student)
+        db.session.flush()
+
         samples = [
-            ('Math', 82, 100, 82), ('Physics', 68, 100, 68), ('Chemistry', 74, 100, 74),
-            ('English', 88, 100, 88), ('Arabic', 91, 100, 91)
+            ('Math', 82, 100),
+            ('Physics', 68, 100),
+            ('Chemistry', 74, 100),
+            ('English', 88, 100),
+            ('Arabic', 91, 100)
         ]
-        for subject, grade, maximum, pct in samples:
-            conn.execute('INSERT INTO grades(student_id,subject,grade,max_grade,percentage,recorded_at) VALUES(?,?,?,?,?,?)',
-                         (sid, subject, grade, maximum, pct, now))
-    conn.commit(); conn.close()
+
+        for subject, grade, maximum in samples:
+            db.session.add(
+                Grade(
+                    student_id=student.id,
+                    subject=subject,
+                    grade=grade,
+                    max_grade=maximum,
+                    percentage=round((grade / maximum) * 100, 2),
+                    recorded_at=now
+                )
+            )
+
+        db.session.commit()
 
 
 def get_student_by_session():
     sid = session.get('student_id')
+
     if not sid:
         return None
-    conn = db(); row = conn.execute('SELECT * FROM students WHERE id=?', (sid,)).fetchone(); conn.close()
-    return row
+
+    return db.session.get(Student, sid)
+
+
+def grade_payload(grade):
+    return {
+        'id': grade.id,
+        'student_id': grade.student_id,
+        'subject': grade.subject,
+        'grade': grade.grade,
+        'max_grade': grade.max_grade,
+        'percentage': grade.percentage,
+        'recorded_at': grade.recorded_at.isoformat()
+    }
+
+
+def note_payload(note):
+    return {
+        'id': note.id,
+        'student_id': note.student_id,
+        'subject': note.subject,
+        'note': note.note,
+        'period': note.period,
+        'created_at': note.created_at.isoformat()
+    }
 
 
 def student_payload(student):
-    conn = db()
-    grades = conn.execute('SELECT * FROM grades WHERE student_id=? ORDER BY recorded_at ASC, id ASC', (student['id'],)).fetchall()
-    notes = conn.execute('SELECT * FROM notes WHERE student_id=? ORDER BY created_at DESC, id DESC', (student['id'],)).fetchall()
-    conn.close()
+
+    grades = (
+        Grade.query
+        .filter_by(student_id=student.id)
+        .order_by(Grade.recorded_at.asc(), Grade.id.asc())
+        .all()
+    )
+
+    notes = (
+        Note.query
+        .filter_by(student_id=student.id)
+        .order_by(Note.created_at.desc(), Note.id.desc())
+        .all()
+    )
+
     return {
-        'id': student['id'], 'name': student['name'], 'code': student['code_display'],
-        'grades': [dict(x) for x in grades], 'notes': [dict(x) for x in notes]
+        'id': student.id,
+        'name': student.name,
+        'code': student.code_display,
+        'grades': [grade_payload(x) for x in grades],
+        'notes': [note_payload(x) for x in notes]
     }
+
 
 @app.get('/')
 def index():
     return send_from_directory(BASE, 'index.html')
 
+
 @app.get('/api/me')
 def me():
+
     student = get_student_by_session()
-    return jsonify({'authenticated': bool(student), 'student': student_payload(student) if student else None})
+
+    return jsonify({
+        'authenticated': bool(student),
+        'student': student_payload(student) if student else None
+    })
+
 
 @app.post('/api/auth')
 def auth():
+
     data = request.get_json(force=True)
+
     code = (data.get('code') or '').strip()
+
     if not code:
-        return jsonify({'error': 'Student code is required.'}), 400
-    conn = db(); student = conn.execute('SELECT * FROM students WHERE code_hash=?', (hash_code(code),)).fetchone(); conn.close()
+        return jsonify({
+            'error': 'Student code is required.'
+        }), 400
+
+    student = Student.query.filter_by(
+        code_hash=hash_code(code)
+    ).first()
+
     if not student:
-        return jsonify({'error': 'Invalid student code.'}), 401
-    session['student_id'] = student['id']
+        return jsonify({
+            'error': 'Invalid student code.'
+        }), 401
+
+    session['student_id'] = student.id
+
     return jsonify(student_payload(student))
+
 
 @app.post('/api/logout')
 def logout():
-    session.clear(); return jsonify({'ok': True})
+
+    session.clear()
+
+    return jsonify({
+        'ok': True
+    })
+
 
 @app.post('/api/students')
 def create_student():
+
     data = request.get_json(force=True)
+
     name = (data.get('name') or '').strip()
     code = (data.get('code') or '').strip()
+
     if len(name) < 2 or len(code) < 4:
-        return jsonify({'error': 'Enter a student name and a code of at least 4 characters.'}), 400
-    conn = db()
-    try:
-        now = datetime.now(timezone.utc).isoformat()
-        conn.execute('INSERT INTO students(name, code_hash, code_display, created_at) VALUES(?,?,?,?)',
-                     (name, hash_code(code), code.upper(), now))
-        sid = conn.execute('SELECT last_insert_rowid()').fetchone()[0]
-        conn.commit()
-        student = conn.execute('SELECT * FROM students WHERE id=?', (sid,)).fetchone()
-    except sqlite3.IntegrityError:
-        conn.close(); return jsonify({'error': 'That student code is already in use.'}), 409
-    conn.close(); session['student_id'] = student['id']
+        return jsonify({
+            'error': 'Enter a student name and a code of at least 4 characters.'
+        }), 400
+
+    existing = Student.query.filter_by(
+        code_hash=hash_code(code)
+    ).first()
+
+    if existing:
+        return jsonify({
+            'error': 'That student code is already in use.'
+        }), 409
+
+    student = Student(
+        name=name,
+        code_hash=hash_code(code),
+        code_display=code.upper(),
+        created_at=datetime.now(timezone.utc)
+    )
+
+    db.session.add(student)
+    db.session.commit()
+
+    session['student_id'] = student.id
+
     return jsonify(student_payload(student)), 201
+
 
 @app.post('/api/grades')
 def add_grade():
+
     student = get_student_by_session()
-    if not student: return jsonify({'error': 'Authenticate first.'}), 401
+
+    if not student:
+        return jsonify({
+            'error': 'Authenticate first.'
+        }), 401
+
     data = request.get_json(force=True)
+
     subject = (data.get('subject') or '').strip()
+
     try:
         grade = float(data.get('grade'))
         maximum = float(data.get('max_grade'))
     except (TypeError, ValueError):
-        return jsonify({'error': 'Grade and maximum must be numbers.'}), 400
+        return jsonify({
+            'error': 'Grade and maximum must be numbers.'
+        }), 400
+
     if not subject or maximum <= 0 or grade < 0 or grade > maximum:
-        return jsonify({'error': 'Check the subject and grade range.'}), 400
-    pct = round((grade / maximum) * 100, 2)
-    now = datetime.now(timezone.utc).isoformat()
-    conn = db(); conn.execute('INSERT INTO grades(student_id,subject,grade,max_grade,percentage,recorded_at) VALUES(?,?,?,?,?,?)',
-                               (student['id'], subject, grade, maximum, pct, now)); conn.commit(); conn.close()
-    return jsonify({'ok': True, 'percentage': pct})
+        return jsonify({
+            'error': 'Check the subject and grade range.'
+        }), 400
+
+    percentage = round(
+        (grade / maximum) * 100,
+        2
+    )
+
+    new_grade = Grade(
+        student_id=student.id,
+        subject=subject,
+        grade=grade,
+        max_grade=maximum,
+        percentage=percentage,
+        recorded_at=datetime.now(timezone.utc)
+    )
+
+    db.session.add(new_grade)
+    db.session.commit()
+
+    return jsonify({
+        'ok': True,
+        'percentage': percentage
+    })
+
 
 @app.post('/api/notes')
 def add_note():
+
     student = get_student_by_session()
-    if not student: return jsonify({'error': 'Authenticate first.'}), 401
+
+    if not student:
+        return jsonify({
+            'error': 'Authenticate first.'
+        }), 401
+
     data = request.get_json(force=True)
+
     note = (data.get('note') or '').strip()
     subject = (data.get('subject') or '').strip() or None
     period = (data.get('period') or '').strip() or None
-    if not note: return jsonify({'error': 'Write a note first.'}), 400
-    now = datetime.now(timezone.utc).isoformat()
-    conn = db(); conn.execute('INSERT INTO notes(student_id,subject,note,period,created_at) VALUES(?,?,?,?,?)',
-                               (student['id'], subject, note, period, now)); conn.commit(); conn.close()
-    return jsonify({'ok': True})
+
+    if not note:
+        return jsonify({
+            'error': 'Write a note first.'
+        }), 400
+
+    new_note = Note(
+        student_id=student.id,
+        subject=subject,
+        note=note,
+        period=period,
+        created_at=datetime.now(timezone.utc)
+    )
+
+    db.session.add(new_note)
+    db.session.commit()
+
+    return jsonify({
+        'ok': True
+    })
+
 
 @app.get('/api/data')
 def data():
+
     student = get_student_by_session()
-    if not student: return jsonify({'error': 'Authenticate first.'}), 401
+
+    if not student:
+        return jsonify({
+            'error': 'Authenticate first.'
+        }), 401
+
     return jsonify(student_payload(student))
 
-if __name__ == '__main__':
+
+# Create database tables automatically
+with app.app_context():
     init_db()
-    app.run(host='127.0.0.1', port=5000, debug=True)
+
+
+if __name__ == '__main__':
+    app.run(
+        host='127.0.0.1',
+        port=5000,
+        debug=True
+    )
