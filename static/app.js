@@ -84,15 +84,8 @@ function selectRole(role) {
     );
   });
 
-  setHidden(
-    $("studentAuth"),
-    role !== "student"
-  );
-
-  setHidden(
-    $("parentAuth"),
-    role !== "parent"
-  );
+  setHidden($("studentAuth"), role !== "student");
+  setHidden($("parentAuth"), role !== "parent");
 }
 
 /* =========================================================
@@ -100,20 +93,14 @@ function selectRole(role) {
    ========================================================= */
 
 function useDemo() {
-  if (currentRole === "parent") {
-    const input = $("parentCode");
+  const input =
+    currentRole === "parent"
+      ? $("parentCode")
+      : $("studentCode");
 
-    if (input) {
-      input.value = "DEMO-2026";
-      input.focus();
-    }
-  } else {
-    const input = $("studentCode");
-
-    if (input) {
-      input.value = "DEMO-2026";
-      input.focus();
-    }
+  if (input) {
+    input.value = "DEMO-2026";
+    input.focus();
   }
 }
 
@@ -138,9 +125,7 @@ async function authenticate() {
   try {
     const data = await api("/api/auth", {
       method: "POST",
-      body: JSON.stringify({
-        code: code
-      })
+      body: JSON.stringify({ code: code })
     });
 
     openDashboard(data);
@@ -220,8 +205,7 @@ function updateProfile() {
   }
 
   if ($("avatar")) {
-    $("avatar").textContent =
-      name.charAt(0).toUpperCase();
+    $("avatar").textContent = name.charAt(0).toUpperCase();
   }
 
   if ($("welcomeText")) {
@@ -236,19 +220,13 @@ function updateProfile() {
   const notesComposer = $("notesComposer");
 
   if (notesComposer) {
-    setHidden(
-      notesComposer,
-      currentRole !== "parent"
-    );
+    setHidden(notesComposer, currentRole !== "parent");
   }
 
   const addGradeButton = $("addGradeButton");
 
   if (addGradeButton) {
-    setHidden(
-      addGradeButton,
-      currentRole !== "student"
-    );
+    setHidden(addGradeButton, currentRole !== "student");
   }
 }
 
@@ -257,11 +235,7 @@ function updateProfile() {
    ========================================================= */
 
 function showView(viewName) {
-  const views = [
-    "overview",
-    "history",
-    "notes"
-  ];
+  const views = ["overview", "history", "notes"];
 
   views.forEach(name => {
     const view = $(`${name}View`);
@@ -316,15 +290,13 @@ function renderAverage() {
   }
 
   const total = grades.reduce(
-    (sum, grade) =>
-      sum + Number(grade.percentage || 0),
+    (sum, grade) => sum + Number(grade.percentage || 0),
     0
   );
 
   const average = total / grades.length;
 
-  averageElement.textContent =
-    `${average.toFixed(1)}%`;
+  averageElement.textContent = `${average.toFixed(1)}%`;
 }
 
 /* =========================================================
@@ -338,8 +310,7 @@ function renderLatestGrades() {
 
   const grades = [...(currentStudent.grades || [])]
     .sort((a, b) => {
-      return new Date(b.recorded_at) -
-             new Date(a.recorded_at);
+      return new Date(b.recorded_at) - new Date(a.recorded_at);
     });
 
   if (!grades.length) {
@@ -355,8 +326,7 @@ function renderLatestGrades() {
   container.innerHTML = grades
     .slice(0, 6)
     .map(grade => {
-      const percentage =
-        Number(grade.percentage || 0);
+      const percentage = Number(grade.percentage || 0);
 
       return `
         <div class="grade-item">
@@ -393,6 +363,7 @@ function renderCurrentChart() {
 
   const latestBySubject = {};
 
+  // Grades arrive oldest -> newest, so the last one per subject wins
   grades.forEach(grade => {
     latestBySubject[grade.subject] = grade;
   });
@@ -421,11 +392,8 @@ function renderCurrentChart() {
       datasets: [
         {
           label: "Percentage",
-
           data: values,
-
           borderWidth: 1,
-
           borderRadius: 7
         }
       ]
@@ -433,7 +401,6 @@ function renderCurrentChart() {
 
     options: {
       responsive: true,
-
       maintainAspectRatio: false,
 
       scales: {
@@ -454,8 +421,7 @@ function renderCurrentChart() {
 
         tooltip: {
           callbacks: {
-            label: context =>
-              `${context.parsed.y}%`
+            label: context => `${context.parsed.y}%`
           }
         }
       }
@@ -464,7 +430,7 @@ function renderCurrentChart() {
 }
 
 /* =========================================================
-   History chart
+   History chart (progress over time)
    ========================================================= */
 
 function renderHistoryChart() {
@@ -479,41 +445,64 @@ function renderHistoryChart() {
     historyChart = null;
   }
 
-  if (typeof Chart === "undefined") {
+  if (typeof Chart === "undefined" || !grades.length) {
     return;
   }
 
-  if (!grades.length) {
-    return;
-  }
+  // Every distinct recording moment, oldest -> newest
+  const timestamps = [
+    ...new Set(grades.map(grade => grade.recorded_at))
+  ].sort((a, b) => new Date(a) - new Date(b));
+
+  const indexByTime = new Map(
+    timestamps.map((time, index) => [time, index])
+  );
+
+  // If several entries share a date, include the time in the label
+  const dateCounts = {};
+
+  timestamps.forEach(time => {
+    const key = formatShortDate(time);
+    dateCounts[key] = (dateCounts[key] || 0) + 1;
+  });
+
+  const labels = timestamps.map(time => {
+    const day = formatShortDate(time);
+
+    if (dateCounts[day] > 1) {
+      const clock = new Date(time).toLocaleTimeString(undefined, {
+        hour: "numeric",
+        minute: "2-digit"
+      });
+
+      return [day, clock];
+    }
+
+    return day;
+  });
 
   const subjects = [
-    ...new Set(
-      grades.map(grade => grade.subject)
-    )
+    ...new Set(grades.map(grade => grade.subject))
   ];
 
   const datasets = subjects.map(subject => {
-    const subjectGrades = grades
+    const data = new Array(timestamps.length).fill(null);
+
+    grades
       .filter(grade => grade.subject === subject)
-      .sort((a, b) =>
-        new Date(a.recorded_at) -
-        new Date(b.recorded_at)
-      );
+      .forEach(grade => {
+        data[indexByTime.get(grade.recorded_at)] =
+          Number(grade.percentage || 0);
+      });
 
     return {
       label: subject,
-
-      data: subjectGrades.map(grade => ({
-        x: formatShortDate(grade.recorded_at),
-        y: Number(grade.percentage || 0)
-      })),
-
-      tension: 0.3,
-
+      data: data,
+      spanGaps: true,
+      tension: 0.25,
       borderWidth: 2,
-
-      pointRadius: 4
+      pointRadius: 4,
+      pointHoverRadius: 6
     };
   });
 
@@ -521,12 +510,12 @@ function renderHistoryChart() {
     type: "line",
 
     data: {
+      labels: labels,
       datasets: datasets
     },
 
     options: {
       responsive: true,
-
       maintainAspectRatio: false,
 
       interaction: {
@@ -536,7 +525,11 @@ function renderHistoryChart() {
 
       scales: {
         x: {
-          type: "category"
+          ticks: {
+            maxRotation: 0,
+            autoSkip: true,
+            maxTicksLimit: 10
+          }
         },
 
         y: {
@@ -545,6 +538,27 @@ function renderHistoryChart() {
 
           ticks: {
             callback: value => `${value}%`
+          }
+        }
+      },
+
+      plugins: {
+        tooltip: {
+          callbacks: {
+            title: items => {
+              const time = timestamps[items[0].dataIndex];
+
+              return new Date(time).toLocaleString(undefined, {
+                year: "numeric",
+                month: "short",
+                day: "numeric",
+                hour: "numeric",
+                minute: "2-digit"
+              });
+            },
+
+            label: context =>
+              `${context.dataset.label}: ${context.parsed.y}%`
           }
         }
       }
@@ -563,8 +577,7 @@ function renderHistory() {
 
   const grades = [...(currentStudent.grades || [])]
     .sort((a, b) => {
-      return new Date(b.recorded_at) -
-             new Date(a.recorded_at);
+      return new Date(b.recorded_at) - new Date(a.recorded_at);
     });
 
   if (!grades.length) {
@@ -593,21 +606,15 @@ function renderHistory() {
         ${grades.map(grade => `
           <tr>
             <td>
-              <strong>
-                ${escapeHTML(grade.subject)}
-              </strong>
+              <strong>${escapeHTML(grade.subject)}</strong>
             </td>
 
             <td>
-              ${Number(grade.grade)}
-              /
-              ${Number(grade.max_grade)}
+              ${Number(grade.grade)} / ${Number(grade.max_grade)}
             </td>
 
             <td>
-              <strong>
-                ${Number(grade.percentage).toFixed(1)}%
-              </strong>
+              <strong>${Number(grade.percentage).toFixed(1)}%</strong>
             </td>
 
             <td>
@@ -646,9 +653,7 @@ function renderNotes() {
     <div class="note-item">
 
       <strong>
-        ${escapeHTML(
-          note.subject || "General note"
-        )}
+        ${escapeHTML(note.subject || "General note")}
       </strong>
 
       <p>
@@ -676,14 +681,9 @@ function renderNotes() {
 }
 
 async function addNote() {
-  const subject =
-    $("noteSubject")?.value.trim() || "";
-
-  const period =
-    $("notePeriod")?.value.trim() || "";
-
-  const note =
-    $("noteText")?.value.trim() || "";
+  const subject = $("noteSubject")?.value.trim() || "";
+  const period = $("notePeriod")?.value.trim() || "";
+  const note = $("noteText")?.value.trim() || "";
 
   if (!note) {
     showToast("Write a note first.");
@@ -750,11 +750,8 @@ function closeGradeModal() {
 }
 
 function previewPercentage() {
-  const grade =
-    parseFloat($("gradeValue")?.value);
-
-  const maximum =
-    parseFloat($("maxValue")?.value);
+  const grade = parseFloat($("gradeValue")?.value);
+  const maximum = parseFloat($("maxValue")?.value);
 
   const preview = $("pctPreview");
 
@@ -769,22 +766,15 @@ function previewPercentage() {
     return;
   }
 
-  const percentage =
-    (grade / maximum) * 100;
+  const percentage = (grade / maximum) * 100;
 
-  preview.textContent =
-    `${percentage.toFixed(1)}%`;
+  preview.textContent = `${percentage.toFixed(1)}%`;
 }
 
 async function saveGrade() {
-  const subject =
-    $("gradeSubject")?.value.trim() || "";
-
-  const grade =
-    parseFloat($("gradeValue")?.value);
-
-  const maximum =
-    parseFloat($("maxValue")?.value);
+  const subject = $("gradeSubject")?.value.trim() || "";
+  const grade = parseFloat($("gradeValue")?.value);
+  const maximum = parseFloat($("maxValue")?.value);
 
   if (!subject) {
     showToast("Enter a subject.");
@@ -805,9 +795,7 @@ async function saveGrade() {
   }
 
   if (grade < 0 || grade > maximum) {
-    showToast(
-      "Points earned must be between 0 and the maximum."
-    );
+    showToast("Points earned must be between 0 and the maximum.");
     return;
   }
 
@@ -954,10 +942,7 @@ document.addEventListener("keydown", event => {
 document.addEventListener("click", event => {
   const modal = $("gradeModal");
 
-  if (
-    modal &&
-    event.target === modal
-  ) {
+  if (modal && event.target === modal) {
     closeGradeModal();
   }
 });
@@ -976,14 +961,8 @@ async function initializeApp() {
       openDashboard(data.student);
     }
   } catch (error) {
-    console.error(
-      "GradeTrack startup error:",
-      error
-    );
+    console.error("GradeTrack startup error:", error);
   }
 }
 
-document.addEventListener(
-  "DOMContentLoaded",
-  initializeApp
-);
+document.addEventListener("DOMContentLoaded", initializeApp);
